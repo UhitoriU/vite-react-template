@@ -11,6 +11,8 @@ export { Sandbox } from "@cloudflare/sandbox";
 type Bindings = Env & {
 	Sandbox: DurableObjectNamespace<Sandbox>;
 	ANTHROPIC_API_KEY?: string;
+	ANTHROPIC_BASE_URL?: string;
+	ANTHROPIC_AUTH_TOKEN?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -110,17 +112,44 @@ app.get("/api/agent/stream-mock", (_c) => {
 	});
 });
 
-// 1) 真实的流式返回：在 Cloudflare Sandbox 容器内运行 Claude Agent SDK（query），并把 stdout 的 NDJSON 转发给前端
-app.get("/api/agent/stream", async (c) => {
-	const prompt = new URL(c.req.url).searchParams.get("q")?.trim() || "你好！请用一句话介绍你自己。";
+// 1) 流式返回：在 Cloudflare Sandbox 容器内运行 Claude Agent SDK（query），并把 stdout 的 NDJSON 转发给前端
+// 支持 POST JSON：{ prompt?: string, messages?: Array<ClaudeInputMessage>, options?: object }
+// 说明：Sandbox exec 不支持 stdin 流式写入，因此“输入流”会在 Worker 侧完整读取后再启动 SDK。
+app.post("/api/agent/stream", async (c) => {
+	const body = (await c.req.json().catch(() => ({}))) as {
+		prompt?: string;
+		messages?: Array<{
+			type: "user";
+			message: {
+				role: "user";
+				content:
+					| string
+					| Array<{
+							type: "text" | "image";
+							text?: string;
+							source?: {
+								type: "base64";
+								media_type: string;
+								data: string;
+							};
+					  }>;
+			};
+			delayMs?: number;
+		}>;
+		options?: Record<string, unknown>;
+	};
+	const prompt =
+		typeof body.prompt === "string" && body.prompt.trim()
+			? body.prompt.trim()
+			: "你好！请用一句话介绍你自己。";
 
-	if (!c.env.ANTHROPIC_API_KEY) {
+	if (!c.env.ANTHROPIC_API_KEY && !c.env.ANTHROPIC_AUTH_TOKEN) {
 		return c.json(
 			{
 				ok: false,
 				action: "stream",
 				note:
-					"缺少 ANTHROPIC_API_KEY。请在项目根目录运行：wrangler secret put ANTHROPIC_API_KEY",
+					"缺少密钥。请设置 ANTHROPIC_API_KEY（官方）或 ANTHROPIC_AUTH_TOKEN（中转）。",
 			},
 			500,
 		);
@@ -134,19 +163,36 @@ app.get("/api/agent/stream", async (c) => {
 	const session = await sandbox.createSession({
 		id: sessionId,
 		env: {
-			ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY,
-			AGENT_PROMPT: prompt,
+			...(c.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY } : {}),
+			...(c.env.ANTHROPIC_AUTH_TOKEN
+				? { ANTHROPIC_AUTH_TOKEN: c.env.ANTHROPIC_AUTH_TOKEN }
+				: {}),
+			...(c.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: c.env.ANTHROPIC_BASE_URL } : {}),
 		},
 		cwd: "/workspace",
 	});
+
+	const inputPath = "/workspace/agent-input.json";
+	const inputPayload = {
+		prompt,
+		messages: Array.isArray(body.messages) ? body.messages : undefined,
+		options: typeof body.options === "object" && body.options ? body.options : undefined,
+	};
+	await session.writeFile(inputPath, JSON.stringify(inputPayload), { encoding: "utf8" });
 
 	const runnerPath = "/workspace/agent-runner.mjs";
 	await session.writeFile(
 		runnerPath,
 		// 这个 runner 在容器里执行，并把 SDK 的 streaming messages 逐行 NDJSON 输出到 stdout
 		String.raw`import { query } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync } from "fs";
 
-const prompt = process.env.AGENT_PROMPT || "hello";
+const input = JSON.parse(readFileSync("${inputPath}", "utf8"));
+const prompt = typeof input.prompt === "string" ? input.prompt : "hello";
+const messages = Array.isArray(input.messages) ? input.messages : null;
+const options = input.options && typeof input.options === "object" ? input.options : undefined;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function safeStringify(value) {
 	return JSON.stringify(
@@ -159,16 +205,34 @@ function write(obj) {
 	process.stdout.write(safeStringify(obj) + "\n");
 }
 
-try {
-	write({ type: "meta", subtype: "start", ts: Date.now(), prompt });
+async function* generateMessages() {
+	if (messages && messages.length) {
+		for (const item of messages) {
+			if (item && typeof item.delayMs === "number" && item.delayMs > 0) {
+				await sleep(item.delayMs);
+			}
+			yield item;
+		}
+		return;
+	}
+	yield {
+		type: "user",
+		message: { role: "user", content: prompt },
+	};
+}
 
-	for await (const message of query({
-		prompt,
+try {
+	write({ type: "meta", subtype: "start", ts: Date.now(), prompt, hasMessages: !!messages });
+
+const response = query({
+		prompt: messages ? generateMessages() : prompt,
 		options: {
-			allowedTools: ["Read", "Edit", "Glob"],
-			permissionMode: "acceptEdits",
+			includePartialMessages: true,
+			...(options && typeof options === "object" ? options : {}),
 		},
-	})) {
+	});
+
+	for await (const message of response) {
 		write({ type: "sdk", message });
 	}
 

@@ -62,6 +62,8 @@ function App() {
 	const [busy, setBusy] = useState<string | null>(null);
 	const [logs, setLogs] = useState<LogEntry[]>([]);
 	const [lastJson, setLastJson] = useState<unknown>(null);
+	const [prompt, setPrompt] = useState("Help me build a web application");
+	const [streamText, setStreamText] = useState("");
 	const abortRef = useRef<AbortController | null>(null);
 
 	const prettyJson = useMemo(() => {
@@ -82,6 +84,7 @@ function App() {
 		abortRef.current = null;
 		setLogs([]);
 		setLastJson(null);
+		setStreamText("");
 		setBusy(null);
 	};
 
@@ -130,6 +133,70 @@ function App() {
 
 			<div className="grid">
 				<div className="card">
+					<div className="row">
+						<input
+							value={prompt}
+							onChange={(event) => setPrompt(event.target.value)}
+							placeholder="输入你的问题..."
+							className="input"
+							disabled={busy !== null}
+						/>
+						<button
+							disabled={busy !== null || prompt.trim().length === 0}
+							onClick={() =>
+								run("前端流式", async (signal) => {
+									setLastJson(null);
+									setStreamText("");
+									const res = await fetch("/api/agent/stream", {
+										method: "POST",
+										signal,
+										headers: { "content-type": "application/json" },
+										body: JSON.stringify({
+											prompt: prompt.trim(),
+											options: { maxTurns: 5 },
+										}),
+									});
+									if (!res.ok) {
+										throw new Error(`HTTP ${res.status} ${res.statusText}`);
+									}
+									for await (const msg of readNdjson(res)) {
+										appendLog({ level: "info", message: "stream", data: msg });
+										const sdk = (msg as { type?: string; message?: any }) ?? {};
+										if (sdk.type !== "sdk" || !sdk.message) continue;
+
+										if (sdk.message.type === "stream_event") {
+											const event = sdk.message.event;
+											if (
+												event?.type === "content_block_delta" &&
+												event?.delta?.type === "text_delta"
+											) {
+												const chunk = event.delta.text ?? "";
+												if (chunk) {
+													setStreamText((prev) => prev + chunk);
+												}
+											}
+											continue;
+										}
+
+										if (sdk.message.type === "assistant") {
+											const parts = sdk.message.message?.content ?? [];
+											const chunk = parts
+												.map((p: { type?: string; text?: string }) =>
+													p?.type === "text" ? p.text ?? "" : "",
+												)
+												.join("");
+											if (chunk) {
+												setStreamText((prev) => prev + chunk);
+											}
+										}
+									}
+								})
+						}
+						>
+							发送
+						</button>
+					</div>
+					<p className="hint">输入问题后点击发送，右侧会实时追加流式输出</p>
 					<div className="row">
 						<button onClick={clear} disabled={busy !== null}>
 							清空
@@ -261,7 +328,9 @@ function App() {
 							{busy ? `运行中：${busy}` : "空闲"}
 						</div>
 					</div>
-					<pre className="json">{prettyJson || "(点击按钮开始测试)"}</pre>
+					<pre className="json">
+						{streamText || prettyJson || "(点击按钮开始测试)"}
+					</pre>
 
 					<div className="panelHeader">
 						<div className="panelTitle">日志</div>
