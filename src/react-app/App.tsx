@@ -12,20 +12,23 @@ type LogEntry = {
 	data?: unknown;
 };
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-	const res = await fetch(url, {
-		...init,
-		headers: {
-			"content-type": "application/json",
-			...(init?.headers ?? {}),
-		},
-	});
-	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		throw new Error(`HTTP ${res.status} ${res.statusText}${text ? `: ${text}` : ""}`);
-	}
-	return (await res.json()) as T;
-}
+type SandboxHoldResponse = {
+	ok: boolean;
+	id: string;
+	command: string;
+	holdSeconds: number;
+	elapsedMs: number;
+	processId?: string;
+	instanceType?: string;
+	error?: {
+		name?: string;
+		message?: string;
+		code?: string;
+		httpStatus?: number;
+		operation?: string;
+		context?: unknown;
+	};
+};
 
 async function* readNdjson(response: Response): AsyncGenerator<unknown, void, void> {
 	if (!response.body) {
@@ -67,6 +70,10 @@ function App() {
 	const streamHasDeltaRef = useRef(false);
 	const [subagentCount, setSubagentCount] = useState(3);
 	const [subagentParallel, setSubagentParallel] = useState(true);
+	const [loadInstanceType, setLoadInstanceType] = useState("basic");
+	const [loadTotal, setLoadTotal] = useState(200);
+	const [loadConcurrency, setLoadConcurrency] = useState(50);
+	const [loadHoldSeconds, setLoadHoldSeconds] = useState(60);
 	const abortRef = useRef<AbortController | null>(null);
 
 	const prettyJson = useMemo(() => {
@@ -174,6 +181,131 @@ function App() {
 				setLastJson(payload.data);
 			}
 		}
+	};
+
+	const postSandboxHold = async (
+		payload: {
+			id: string;
+			holdSeconds: number;
+			instanceType: string;
+		},
+		signal: AbortSignal,
+	): Promise<SandboxHoldResponse> => {
+		const res = await fetch("/api/sandbox/hold", {
+			method: "POST",
+			signal,
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(payload),
+		});
+		const text = await res.text();
+		let json: SandboxHoldResponse | null = null;
+		try {
+			json = text ? (JSON.parse(text) as SandboxHoldResponse) : null;
+		} catch {
+			json = null;
+		}
+		if (!res.ok || !json || !json.ok) {
+			const reason = json?.error?.message ?? `HTTP ${res.status} ${res.statusText}`;
+			const err = new Error(reason);
+			(err as any).response = json;
+			throw err;
+		}
+		return json;
+	};
+
+	const percentile = (values: number[], p: number) => {
+		if (!values.length) return null;
+		const sorted = [...values].sort((a, b) => a - b);
+		const idx = Math.min(
+			sorted.length - 1,
+			Math.max(0, Math.floor((p / 100) * sorted.length)),
+		);
+		return sorted[idx];
+	};
+
+	const runSandboxLoadTest = async (signal: AbortSignal) => {
+		setLastJson(null);
+		setStreamText("");
+		const total = Math.max(1, Math.floor(loadTotal));
+		const concurrency = Math.max(1, Math.floor(loadConcurrency));
+		const holdSeconds = Math.max(1, Math.floor(loadHoldSeconds));
+		const prefix = `sb-${Date.now().toString(36)}-`;
+
+		let nextIndex = 0;
+		let success = 0;
+		let failed = 0;
+		const durations: number[] = [];
+		const failReasons = new Map<string, number>();
+		const failSamples = new Map<string, number>();
+
+		const recordFailure = (reason: string) => {
+			failed += 1;
+			failReasons.set(reason, (failReasons.get(reason) ?? 0) + 1);
+		};
+
+		const worker = async () => {
+			while (true) {
+				const current = nextIndex;
+				nextIndex += 1;
+				if (current >= total) return;
+				const id = `${prefix}${current}`;
+				const started = Date.now();
+				try {
+					await postSandboxHold(
+						{ id, holdSeconds, instanceType: loadInstanceType },
+						signal,
+					);
+					durations.push(Date.now() - started);
+					success += 1;
+				} catch (err) {
+					durations.push(Date.now() - started);
+					const reason =
+						err instanceof Error ? err.message : typeof err === "string" ? err : "Unknown error";
+					recordFailure(reason);
+					const sampleCount = (failSamples.get(reason) ?? 0) + 1;
+					failSamples.set(reason, sampleCount);
+					if (sampleCount <= 3) {
+						appendLog({
+							level: "error",
+							message: "sandbox failed",
+							data: { id, reason },
+						});
+					}
+				}
+
+				const finished = success + failed;
+				if (finished % 25 === 0 || finished === total) {
+					appendLog({
+						level: "info",
+						message: "progress",
+						data: {
+							total,
+							finished,
+							success,
+							failed,
+						},
+					});
+				}
+			}
+		};
+
+		const workers = Array.from({ length: Math.min(concurrency, total) }, () => worker());
+		await Promise.all(workers);
+
+		const p50 = percentile(durations, 50);
+		const p95 = percentile(durations, 95);
+		const summary = {
+			total,
+			concurrency,
+			instanceType: loadInstanceType,
+			holdSeconds,
+			success,
+			failed,
+			p50Ms: p50,
+			p95Ms: p95,
+			failReasons: Object.fromEntries(failReasons.entries()),
+		};
+		setLastJson(summary);
 	};
 
 	return (
@@ -364,6 +496,76 @@ function App() {
 							并行
 						</label>
 					</div>
+
+					<div className="row wrap">
+						<label className="chip">
+							实例类型
+							<select
+								value={loadInstanceType}
+								disabled={busy !== null}
+								onChange={(event) => setLoadInstanceType(event.target.value)}
+							>
+								<option value="lite">lite</option>
+								<option value="basic">basic</option>
+								<option value="standard-1">standard-1</option>
+								<option value="standard-2">standard-2</option>
+								<option value="standard-3">standard-3</option>
+								<option value="standard-4">standard-4</option>
+							</select>
+						</label>
+						<label className="chip">
+							总请求
+							<input
+								type="number"
+								min={1}
+								value={loadTotal}
+								disabled={busy !== null}
+								onChange={(event) => {
+									const next = Number(event.target.value);
+									if (Number.isNaN(next)) return;
+									setLoadTotal(Math.max(next, 1));
+								}}
+							/>
+						</label>
+						<label className="chip">
+							并发
+							<input
+								type="number"
+								min={1}
+								value={loadConcurrency}
+								disabled={busy !== null}
+								onChange={(event) => {
+									const next = Number(event.target.value);
+									if (Number.isNaN(next)) return;
+									setLoadConcurrency(Math.max(next, 1));
+								}}
+							/>
+						</label>
+						<label className="chip">
+							占用秒数
+							<input
+								type="number"
+								min={1}
+								value={loadHoldSeconds}
+								disabled={busy !== null}
+								onChange={(event) => {
+									const next = Number(event.target.value);
+									if (Number.isNaN(next)) return;
+									setLoadHoldSeconds(Math.max(next, 1));
+								}}
+							/>
+						</label>
+						<button
+							disabled={busy !== null}
+							onClick={() => run("Sandbox 并发压测", runSandboxLoadTest)}
+						>
+							Sandbox 并发压测
+						</button>
+					</div>
+					<p className="hint">
+						每个请求创建 1 个 sandbox 并启动 sleep，占用资源。实例类型由
+						<code>wrangler.json</code> 决定，这里的选择仅用于记录。
+					</p>
 
 					<div className="row wrap">
 						<button

@@ -159,6 +159,99 @@ app.get("/api/sandbox/claude-code-version", async (c) => {
 	});
 });
 
+type SandboxHoldRequest = {
+	id?: string;
+	holdSeconds?: number;
+	instanceType?: string;
+};
+
+type SandboxHoldResponse = {
+	ok: boolean;
+	id: string;
+	command: string;
+	holdSeconds: number;
+	elapsedMs: number;
+	processId?: string;
+	instanceType?: string;
+	error?: {
+		name?: string;
+		message?: string;
+		code?: string;
+		httpStatus?: number;
+		operation?: string;
+		context?: unknown;
+	};
+};
+
+const parseSandboxHoldRequest = async (c: { req: { json: () => Promise<unknown> } }) => {
+	try {
+		return (await c.req.json()) as SandboxHoldRequest;
+	} catch {
+		return {} as SandboxHoldRequest;
+	}
+};
+
+const clampHoldSeconds = (value: number | undefined, fallback = 60) => {
+	if (!Number.isFinite(value)) return fallback;
+	const seconds = Math.floor(value ?? fallback);
+	if (seconds < 1) return 1;
+	if (seconds > 3600) return 3600;
+	return seconds;
+};
+
+app.post("/api/sandbox/hold", async (c) => {
+	const body = await parseSandboxHoldRequest(c);
+	const id =
+		typeof body.id === "string" && body.id.trim().length > 0
+			? body.id.trim()
+			: `sb-${crypto.randomUUID()}`;
+	const holdSeconds = clampHoldSeconds(body.holdSeconds, 60);
+	const command = `sleep ${holdSeconds}`;
+	const instanceType = typeof body.instanceType === "string" ? body.instanceType : undefined;
+	const startedAt = Date.now();
+
+	try {
+		const sandbox = getSandbox(c.env.Sandbox, id, { normalizeId: true });
+		const process = await sandbox.startProcess(command);
+		const response: SandboxHoldResponse = {
+			ok: true,
+			id,
+			command,
+			holdSeconds,
+			elapsedMs: Date.now() - startedAt,
+			processId: process.id,
+			instanceType,
+		};
+		return c.json(response);
+	} catch (err) {
+		const errorObj: SandboxHoldResponse["error"] = {
+			name: err instanceof Error ? err.name : undefined,
+			message: err instanceof Error ? err.message : typeof err === "string" ? err : undefined,
+		};
+		if (err && typeof err === "object" && "errorResponse" in err) {
+			const errorResponse = (err as { errorResponse?: any }).errorResponse;
+			errorObj.code = errorResponse?.code;
+			errorObj.httpStatus = errorResponse?.httpStatus;
+			errorObj.operation = errorResponse?.operation;
+			errorObj.context = errorResponse?.context;
+			if (typeof errorResponse?.message === "string") {
+				errorObj.message = errorResponse.message;
+			}
+		}
+
+		const response: SandboxHoldResponse = {
+			ok: false,
+			id,
+			command,
+			holdSeconds,
+			elapsedMs: Date.now() - startedAt,
+			instanceType,
+			error: errorObj,
+		};
+		return c.json(response, 500);
+	}
+});
+
 type AgentActionResult = {
 	ok: boolean;
 	action:
