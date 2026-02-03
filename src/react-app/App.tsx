@@ -61,6 +61,17 @@ async function* readNdjson(response: Response): AsyncGenerator<unknown, void, vo
 	}
 }
 
+const readErrorMessage = async (res: Response) => {
+	const text = await res.text().catch(() => "");
+	if (!text) return "";
+	try {
+		const json = JSON.parse(text) as { note?: string; message?: string; error?: any };
+		return json?.note ?? json?.message ?? JSON.stringify(json);
+	} catch {
+		return text;
+	}
+};
+
 function App() {
 	const [busy, setBusy] = useState<string | null>(null);
 	const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -183,6 +194,13 @@ function App() {
 		}
 	};
 
+	const assertOk = async (res: Response) => {
+		if (res.ok) return;
+		const detail = await readErrorMessage(res);
+		const suffix = detail ? `: ${detail}` : "";
+		throw new Error(`HTTP ${res.status} ${res.statusText}${suffix}`);
+	};
+
 	const postSandboxHold = async (
 		payload: {
 			id: string;
@@ -205,7 +223,12 @@ function App() {
 			json = null;
 		}
 		if (!res.ok || !json || !json.ok) {
-			const reason = json?.error?.message ?? `HTTP ${res.status} ${res.statusText}`;
+			const code = json?.error?.code ? `[${json.error.code}] ` : "";
+			const detail = json?.error?.message ?? "";
+			const reason =
+				detail || code
+					? `${code}${detail}`.trim()
+					: `HTTP ${res.status} ${res.statusText}`;
 			const err = new Error(reason);
 			(err as any).response = json;
 			throw err;
@@ -274,7 +297,7 @@ function App() {
 				}
 
 				const finished = success + failed;
-				if (finished % 25 === 0 || finished === total) {
+				if (finished % Math.max(1, concurrency) === 0 || finished === total) {
 					appendLog({
 						level: "info",
 						message: "progress",
@@ -356,9 +379,7 @@ function App() {
 											options: { maxTurns: 5 },
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									for await (const msg of readNdjson(res)) {
 										appendLog({ level: "info", message: "stream", data: msg });
 										const sdk = (msg as { type?: string; message?: any }) ?? {};
@@ -412,9 +433,7 @@ function App() {
 											prompt: prompt.trim(),
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									for await (const msg of readNdjson(res)) {
 										appendLog({ level: "info", message: "stream", data: msg });
 										const sdk = (msg as { type?: string; message?: any }) ?? {};
@@ -574,9 +593,7 @@ function App() {
 								run("1) 流式返回 (NDJSON)", async (signal) => {
 									setLastJson(null);
 									const res = await fetch("/api/agent/stream", { signal });
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									for await (const msg of readNdjson(res)) {
 										appendLog({ level: "info", message: "stream", data: msg });
 									}
@@ -601,9 +618,7 @@ function App() {
 											prompt: prompt.trim(),
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									await consumeNdjson(res);
 								})
 						}
@@ -625,9 +640,7 @@ function App() {
 											testPrompt: prompt.trim() || undefined,
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									await consumeNdjson(res);
 								})
 						}
@@ -648,9 +661,7 @@ function App() {
 											prompt: prompt.trim() || undefined,
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									await consumeNdjson(res);
 								})
 						}
@@ -669,9 +680,7 @@ function App() {
 										signal,
 										body: JSON.stringify({ testCommand: "/cost" }),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									await consumeNdjson(res);
 								})
 						}
@@ -692,9 +701,7 @@ function App() {
 											prompt: prompt.trim() || undefined,
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									await consumeNdjson(res);
 								})
 						}
@@ -716,9 +723,7 @@ function App() {
 												"输出一个 JSON，包含可验证的字段，用于测试结构化输出。",
 										}),
 									});
-									if (!res.ok) {
-										throw new Error(`HTTP ${res.status} ${res.statusText}`);
-									}
+									await assertOk(res);
 									await consumeNdjson(res);
 								})
 						}
