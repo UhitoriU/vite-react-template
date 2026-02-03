@@ -356,7 +356,7 @@ function App() {
 					<img
 						src={cloudflareLogo}
 						className="logo cloudflare"
-						alt="Cloudflare logo"
+						alt="Cloudflare logso"
 					/>
 				</a>
 			</div>
