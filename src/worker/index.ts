@@ -171,6 +171,7 @@ type SandboxHoldResponse = {
 	command: string;
 	holdSeconds: number;
 	elapsedMs: number;
+	destroyed?: boolean;
 	processId?: string;
 	instanceType?: string;
 	error?: {
@@ -209,17 +210,22 @@ app.post("/api/sandbox/hold", async (c) => {
 	const command = `sleep ${holdSeconds}`;
 	const instanceType = typeof body.instanceType === "string" ? body.instanceType : undefined;
 	const startedAt = Date.now();
+	let destroyed = false;
 
 	try {
 		const sandbox = getSandbox(c.env.Sandbox, id, { normalizeId: true });
-		const process = await sandbox.startProcess(command);
+		await sandbox.exec(command, {
+			timeout: (holdSeconds + 10) * 1000,
+		});
+		await sandbox.destroy();
+		destroyed = true;
 		const response: SandboxHoldResponse = {
 			ok: true,
 			id,
 			command,
 			holdSeconds,
 			elapsedMs: Date.now() - startedAt,
-			processId: process.id,
+			destroyed,
 			instanceType,
 		};
 		return c.json(response);
@@ -245,6 +251,7 @@ app.post("/api/sandbox/hold", async (c) => {
 			command,
 			holdSeconds,
 			elapsedMs: Date.now() - startedAt,
+			destroyed,
 			instanceType,
 			error: errorObj,
 		};
