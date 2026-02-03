@@ -282,8 +282,17 @@ function App() {
 					success += 1;
 				} catch (err) {
 					durations.push(Date.now() - started);
-					const reason =
+					const response = (err as any)?.response as SandboxHoldResponse | undefined;
+					const code = response?.error?.code ? `code=${response.error.code}` : "";
+					const status = response?.error?.httpStatus
+						? `http=${response.error.httpStatus}`
+						: "";
+					const op = response?.error?.operation ? `op=${response.error.operation}` : "";
+					const detailParts = [code, status, op].filter(Boolean);
+					const detail = detailParts.length ? ` (${detailParts.join(", ")})` : "";
+					const baseReason =
 						err instanceof Error ? err.message : typeof err === "string" ? err : "Unknown error";
+					const reason = `${baseReason}${detail}`;
 					recordFailure(reason);
 					const sampleCount = (failSamples.get(reason) ?? 0) + 1;
 					failSamples.set(reason, sampleCount);
@@ -291,7 +300,7 @@ function App() {
 						appendLog({
 							level: "error",
 							message: "sandbox failed",
-							data: { id, reason },
+							data: { id, reason, error: response?.error },
 						});
 					}
 				}
