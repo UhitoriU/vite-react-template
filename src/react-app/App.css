@@ -1,8 +1,40 @@
 #root {
+	width: 100%;
+	min-height: 100vh;
+	text-align: left;
+	background: #f3f4f7;
+	color: #1f2430;
+}
+
+.appShell {
 	max-width: 1280px;
 	margin: 0 auto;
 	padding: 2rem;
-	text-align: center;
+	text-align: left;
+}
+
+.appShell.editorShell {
+	max-width: 1400px;
+}
+
+.appNav {
+	display: flex;
+	justify-content: flex-start;
+	gap: 0.75rem;
+	margin-bottom: 1.5rem;
+}
+
+.appNav a {
+	padding: 0.4rem 0.9rem;
+	border-radius: 999px;
+	border: 1px solid rgba(0, 0, 0, 0.1);
+	background: #ffffff;
+	color: inherit;
+}
+
+.appNav a.active {
+	background: rgba(100, 108, 255, 0.2);
+	border-color: rgba(100, 108, 255, 0.6);
 }
 
 .logo {

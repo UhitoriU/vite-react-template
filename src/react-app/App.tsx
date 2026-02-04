@@ -1,8 +1,9 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import reactLogo from "./assets/react.svg";
 import viteLogo from "/vite.svg";
 import cloudflareLogo from "./assets/Cloudflare_Logo.svg";
 import honoLogo from "./assets/hono.svg";
+import EditorPage from "./EditorPage";
 import "./App.css";
 
 type LogEntry = {
@@ -73,6 +74,9 @@ const readErrorMessage = async (res: Response) => {
 };
 
 function App() {
+	const [page, setPage] = useState<"home" | "editor">(
+		window.location.hash === "#editor" ? "editor" : "home",
+	);
 	const [busy, setBusy] = useState<string | null>(null);
 	const [logs, setLogs] = useState<LogEntry[]>([]);
 	const [lastJson, setLastJson] = useState<unknown>(null);
@@ -86,6 +90,14 @@ function App() {
 	const [loadConcurrency, setLoadConcurrency] = useState(50);
 	const [loadHoldSeconds, setLoadHoldSeconds] = useState(60);
 	const abortRef = useRef<AbortController | null>(null);
+
+	useEffect(() => {
+		const onHashChange = () => {
+			setPage(window.location.hash === "#editor" ? "editor" : "home");
+		};
+		window.addEventListener("hashchange", onHashChange);
+		return () => window.removeEventListener("hashchange", onHashChange);
+	}, []);
 
 	const prettyJson = useMemo(() => {
 		if (lastJson === null || lastJson === undefined) return "";
@@ -340,7 +352,7 @@ function App() {
 		setLastJson(summary);
 	};
 
-	return (
+	const home = (
 		<>
 			<div className="min-w-0">
 				<a href="https://vite.dev" target="_blank">
@@ -781,6 +793,28 @@ function App() {
 				后端路由在 <code>src/worker/index.ts</code>；前端在 <code>src/react-app/App.tsx</code>
 			</p>
 		</>
+	);
+
+	return (
+		<div className={`appShell ${page === "editor" ? "editorShell" : "homeShell"}`}>
+			<nav className="appNav">
+				<a
+					href="#home"
+					className={page === "home" ? "active" : undefined}
+					onClick={() => setPage("home")}
+				>
+					边缘沙箱面板
+				</a>
+				<a
+					href="#editor"
+					className={page === "editor" ? "active" : undefined}
+					onClick={() => setPage("editor")}
+				>
+					富文本编辑器
+				</a>
+			</nav>
+			{page === "editor" ? <EditorPage /> : home}
+		</div>
 	);
 }
 
